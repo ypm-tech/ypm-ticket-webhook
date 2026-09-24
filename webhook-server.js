@@ -1,28 +1,16 @@
 "use strict";
 
 /**
- * YPM Support Ticket System — webhook backend
- *
- * Receives a ticket from the Chrome extension, re-derives the destination
- * inbox from `product` (server is authoritative — see TicketSystem_Skill.md
- * §2 rule 3), validates, and dispatches the email.
- *
- * SOURCE OF TRUTH: TicketSystem_Skill.md §3. Change that file first, then
- * mirror ROUTING here and in extension/popup.js in the same change.
- *
- * Setup:
- *   1. cd server && npm install
- *   2. cp .env.example .env  and fill in SMTP + ALLOWED_ORIGIN
- *   3. npm start
+ * YPM Support Ticket System — webhook backend (Resend API version)
  */
 
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
+const { Resend } = require("resend");
 
-// --- Routing map (authoritative). Mirrors TicketSystem_Skill.md §3. ---
+// --- Routing map (authoritative) ---
 const ROUTING = Object.freeze({
   TCR: "theclosingroom@yourpracticemastered.com",
   TSR: "thestaffingroom@yourpracticemastered.com",
@@ -40,8 +28,9 @@ const PRODUCT_NAMES = Object.freeze({
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PORT = process.env.PORT || 3000;
 
-// Lock CORS to the extension's origin. Set ALLOWED_ORIGIN to
-// chrome-extension://<your-extension-id> once the extension is loaded.
+// Inicializa el cliente oficial de Resend vía API (HTTPS)
+const resend = new Resend(process.env.SMTP_PASS);
+
 const app = express();
 app.use(express.json({ limit: "16kb" }));
 app.use(
@@ -52,17 +41,6 @@ app.use(
   })
 );
 
-// Reusable SMTP transport from environment (no secrets in code).
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: String(process.env.SMTP_SECURE || "false") === "true",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
-
 function newTicketId() {
   const d = new Date();
   const stamp =
@@ -72,7 +50,6 @@ function newTicketId() {
   return "TKT-" + stamp + "-" + crypto.randomBytes(3).toString("hex");
 }
 
-// Minimal escaping for values dropped into the HTML email body.
 function esc(s) {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -87,7 +64,6 @@ app.post("/ticket", async (req, res) => {
   const situation = String(body.situation || "").trim();
   const problem = String(body.problem || "").trim();
 
-  // --- Validation (TicketSystem_Skill.md §6). Never default. ---
   if (!product || !ROUTING[product]) {
     return res.status(400).json({ ok: false, error: "Unknown or missing product code." });
   }
@@ -101,7 +77,6 @@ app.post("/ticket", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Problem is required." });
   }
 
-  // Destination derived server-side from product. Client cannot override.
   const routedTo = ROUTING[product];
   const productName = PRODUCT_NAMES[product];
   const ticketId = newTicketId();
@@ -124,9 +99,10 @@ app.post("/ticket", async (req, res) => {
     `<p style="margin:0;white-space:pre-wrap">${esc(problem)}</p>`;
 
   try {
-    await transporter.sendMail({
+    // Envío seguro a través de la API HTTPS de Resend
+    await resend.emails.send({
       from: process.env.FROM_EMAIL,
-      to: routedTo,
+      to: [routedTo],
       replyTo: clientEmail,
       subject,
       text,
